@@ -1,0 +1,343 @@
+```{r}
+#Load required libraries
+library(rstan)
+library(tidyverse)
+library(mgcv)
+library(brms)
+library(visreg)
+library(ggplot2)
+library(GGally)
+library(sf)
+library(raster)
+library(future)
+library(gridExtra)
+library(grid)
+library(busdater)
+library(lubridate)
+library(zoo)
+library(bayestestR)
+library(scales)
+library(cowplot)
+library(ggridges)
+
+
+#set theme for ggplot visuals
+theme_set( theme_bw() + theme(panel.grid = element_blank()) )
+```
+
+Read in data for analysis
+```{r}
+#Monthly climate data for each SILO cell in the ACT. Data includes cell coordinates (x and y), the month (Date), the number of igntiions in the cell that month (Ignitions) the total rainfall (AR), mean maximum daily temperature (AT), mean maximum daily vapour pressure deficit (AVPD) and the area of the cell within Bushfire Prone Areas (Area).
+setwd("D:/")
+datup<-read.csv(...ACT_Ignitions_SILO_Monthly.csv)
+###Longterm monthly climate averages on Bushfire Prone Areas. Data includes cell coordinates (x and y), the month of the year (Month) and the longterm (1961-1990) average monthly rainfall (MR), maximum daily temperature (MT) and maximum daily vapour pressure deficit (MV)
+LT<-read.csv(...LT_Monthly.csv)
+```
+
+
+Process data for analysis
+```{r}
+datup<-datup%>%
+  dplyr::select(-c(X))%>%
+  mutate(Year = year(as.Date(paste(Date,"_1",sep=""),format="%Y_%m_%d")), #Produce Year, Month and Date data in a relevant format
+         Month = month(as.Date(paste(Date,"_1",sep=""),format="%Y_%m_%d")),
+         Date = as.Date(paste(Date,"_1",sep=""),format="%Y_%m_%d"))%>%
+  left_join(LT)%>% #join the longterm average data for each cell
+  arrange(Date)%>%
+  group_by(Year,Month,Date)%>%
+  mutate(Rd = ((AR/MR)-1)*100, #calculate the monthly climate anomaly 
+         Td = ((AT/MT)-1)*100,
+         Vd = ((AVPD/MV)-1)*100)%>%
+  group_by(Year,Month,Date)%>%
+  summarise(Ignitions = sum(Ignitions), #Summaries the data as the total number of ignitions on Bushfire Prone Areas and mean climate anomaly weighted by the areas of each cell on Bushfire Prone Areas.
+            AR = weighted.mean(AR,Area),
+            AT = weighted.mean(AT,Area),
+            AVPD = weighted.mean(AVPD,Area),
+            Rd =weighted.mean(Rd,Area),
+            Td =weighted.mean(Td,Area),
+            Vd =weighted.mean(Vd,Area))%>%
+  ungroup()%>%
+  mutate(R3 = rollmean(Rd,k=3,fill=NA,align="right"), #calculate the mean climate anomaly for the previous 3, 6 and 12 months inclusive.
+         R6 = rollmean(Rd,k=6,fill=NA,align="right"),
+         R12 = rollmean(Rd,k=12,fill=NA,align="right"),
+         T3 = rollmean(Td,k=3,fill=NA,align="right"),
+         T6 = rollmean(Td,k=6,fill=NA,align="right"),
+         T12 = rollmean(Td,k=12,fill=NA,align="right"),
+         V3 = rollmean(Vd,k=3,fill=NA,align="right"),
+         V6 = rollmean(Vd,k=6,fill=NA,align="right"),
+         V12 = rollmean(Vd,k=12,fill=NA,align="right"))%>%
+  filter(Date > "2012-11-01" & Date < "2021-08-01")%>% #restrict data to months with ignition observations.
+  mutate(index = row_number())
+
+```
+
+Bayesian poisson regression models predicting monthly ignitions in response to climate anomalies. the first model in each group is the anomaly for that month. 3, 6 and 12 denote models that use 3, 6 and 12 month climate anomalies.
+```{r}
+set.seed(123)
+plan(multiprocess)
+#Vapour Pressure Deficit
+vup<-brm(Ignitions~(Vd)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+vup3<-brm(Ignitions~(V3)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000, chains=4,future=TRUE,refresh=0)
+vup6<-brm(Ignitions~(V6)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+vup12<-brm(Ignitions~(V12)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000, chains=4,future=TRUE,refresh=0)
+#Rainfall
+rup<-brm(Ignitions~(Rd)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,  chains=4,future=TRUE,refresh=0)
+rup3<-brm(Ignitions~(R3)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+rup6<-brm(Ignitions~(R6)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+rup12<-brm(Ignitions~(R12)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+#Temperature
+tup<-brm(Ignitions~(Td)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,  chains=4,future=TRUE,refresh=0)
+tup3<-brm(Ignitions~(T3)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+tup6<-brm(Ignitions~(T6)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+tup12<-brm(Ignitions~(T12)+s(Month,bs="cc")+ar(time=index),family=poisson(),data=datup,iter = 4000,chains=4,future=TRUE,refresh=0)
+plan(sequential)
+```
+
+Code to produce marginal effects plots for each model. 
+```{r}
+#Vapour Pressure Deficit
+m1<-plot(marginal_effects(vup,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m3<-plot(marginal_effects(vup3,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m6<-plot(marginal_effects(vup6,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m12<-plot(marginal_effects(vup12,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+
+grid.arrange(m1[[1]] + labs(y="Ignitions",x="",tag = "A")+scale_y_continuous(limits=c(1,13)),
+             m1[[2]] + labs(y="",x="",tag = "B")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m3[[1]] + labs(y="Ignitions",x="",tag = "C")+scale_y_continuous(limits=c(1,13)),
+             m3[[2]] + labs(y="",x="",tag = "D")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m6[[1]] + labs(y="Ignitions",x="",tag = "E")+scale_y_continuous(limits=c(1,13)),
+             m6[[2]] + labs(y="",x="",tag = "F")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m12[[1]] + labs(y="Ignitions",x="Vapour pressure deficit anomaly (%)",tag = "G")+scale_y_continuous(limits=c(1,13)),
+             m12[[2]] + labs(y="",x="Month",tag = "H")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             ncol=2)
+#Temperature
+m1<-plot(marginal_effects(tup,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m3<-plot(marginal_effects(tup3,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m6<-plot(marginal_effects(tup6,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m12<-plot(marginal_effects(tup12,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+
+grid.arrange(m1[[1]] + labs(y="Ignitions",x="",tag = "A")+scale_y_continuous(limits=c(1,13)),
+             m1[[2]] + labs(y="",x="",tag = "B")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m3[[1]] + labs(y="Ignitions",x="",tag = "C")+scale_y_continuous(limits=c(1,13)),
+             m3[[2]] + labs(y="",x="",tag = "D")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m6[[1]] + labs(y="Ignitions",x="",tag = "E")+scale_y_continuous(limits=c(1,13)),
+             m6[[2]] + labs(y="",x="",tag = "F")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m12[[1]] + labs(y="Ignitions",x="Temperature anomaly (%)",tag = "G")+scale_y_continuous(limits=c(1,13)),
+             m12[[2]] + labs(y="",x="Month",tag = "H")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             ncol=2)
+#Rainfall
+m1<-plot(marginal_effects(rup,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m3<-plot(marginal_effects(rup3,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m6<-plot(marginal_effects(rup6,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+m12<-plot(marginal_effects(rup12,probs=c(0.05,0.95),method="fitted",points=TRUE,surface=FALSE), ask=FALSE)
+
+grid.arrange(m1[[1]] + labs(y="Ignitions",x="",tag = "A")+scale_y_continuous(limits=c(1,13)),
+             m1[[2]] + labs(y="",x="",tag = "B")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m3[[1]] + labs(y="Ignitions",x="",tag = "C")+scale_y_continuous(limits=c(1,13)),
+             m3[[2]] + labs(y="",x="",tag = "D")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m6[[1]] + labs(y="Ignitions",x="",tag = "E")+scale_y_continuous(limits=c(1,13)),
+             m6[[2]] + labs(y="",x="",tag = "F")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             m12[[1]] + labs(y="Ignitions",x="Precipitation anomaly (%)",tag = "G")+scale_y_continuous(limits=c(1,13)),
+             m12[[2]] + labs(y="",x="Month",tag = "H")+scale_x_continuous(breaks=seq(1,12,by=1))+scale_y_continuous(limits=c(1,13)),
+             ncol=2)
+```
+
+
+Code to produce predicted  vs residuals plots
+```{r}
+#Rainfall
+rRes <- rbind(
+  cbind(datup, 
+        as.data.frame(fitted(rup,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "1 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(rup3,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "3 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(rup6,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "6 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(rup12,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "12 Month"))
+  
+)%>%mutate(Model=factor(Model,levels = c("1 Month","3 Month","6 Month","12 Month")),
+           Predictor = "Precipitation")
+#Temperature
+tRes <- rbind(
+  cbind(datup, 
+        as.data.frame(fitted(tup,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "1 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(tup3,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "3 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(tup6,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "6 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(tup12,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "12 Month"))
+  
+)%>%mutate(Model=factor(Model,levels = c("1 Month","3 Month","6 Month","12 Month")),
+           Predictor = "Temperature")
+#Vapour pressure deficit
+vRes <- rbind(
+  cbind(datup, 
+        as.data.frame(fitted(vup,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "1 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(vup3,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "3 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(vup6,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "6 Month")),
+  cbind(datup, 
+        as.data.frame(fitted(vup12,incl_autocor=FALSE,robust=TRUE,newdata=datup,re_formula=NA,probs=c(0.05,0.95)))%>%
+          mutate(Model = "12 Month"))
+  
+)%>%mutate(Model=factor(Model,levels = c("1 Month","3 Month","6 Month","12 Month")),
+           Predictor = "VPD")
+
+
+resDat<-bind_rows(rRes,tRes)%>%bind_rows(vRes)
+
+ggplot(resDat)+
+  geom_point(aes(Estimate,Ignitions),shape="|")+
+  geom_linerange(aes(y= Ignitions, xmin = Q5, xmax = Q95))+
+  geom_abline(slope = 1)+
+  labs(x="Predicted", y="Observed")+ylim(0,40)+xlim(0,40)+
+  facet_grid(rows=vars(Model),cols=vars(Predictor))+
+    theme(strip.text.x = element_text(face="bold"),
+          strip.text.y = element_text(face="bold"),
+          strip.background = element_rect(colour=NA, fill=NA))
+```
+
+
+Code plot the Bayes R2 values for each model
+```{r}
+d<-data.frame(rbind(c((bayes_R2(rup,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Precipitation',1),
+      c((bayes_R2(rup3,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Precipitation',3),
+      c((bayes_R2(rup6,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Precipitation',6),
+      c((bayes_R2(rup12,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Precipitation',12),
+      c((bayes_R2(tup,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Temperature',1),
+      c((bayes_R2(tup3,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Temperature',3),
+      c((bayes_R2(tup6,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Temperature',6),
+      c((bayes_R2(tup12,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'Temperature',12),
+      c((bayes_R2(vup,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'VPD',1),
+      c((bayes_R2(vup3,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'VPD',3),
+      c((bayes_R2(vup6,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'VPD',6),
+      c((bayes_R2(vup12,rubust=TRUE,probs=c(0.05,0.95)))[c(1,3,4)],'VPD',12)
+))%>%
+  mutate(X1 = as.numeric(X1),
+         X2 = as.numeric(X2),
+         X3 = as.numeric(X3),
+         Months = as.integer(X5),
+         Climate = factor(X4))
+
+ggplot(d)+
+  geom_point(aes(Months,X1,shape=Climate),size=4,position = position_dodge(1.5))+
+  geom_linerange(aes(x= Months, ymin = X2, ymax = X3,group=Climate),size=1,position = position_dodge(1.5))+
+  labs(x="Duration of climate anomaly (months)", y=bquote('Bayes'~R^2),group="Climate anomaly",shape="Climate anomaly")+
+  ylim(0,1)+scale_x_discrete(limits=c(1,3,6,12))
+```
+
+
+Code to plot the predicted monthly ignitions in response to the one month climate anomalies. 
+```{r}
+d<-data.frame(Vd=rep(c(30,0,-30),100),
+              Rd=rep(c(-80,0,120),100),
+              Td=rep(c(15,0,-15),100),
+         Month=rep(seq(1,12,length.out =100),3),
+         index=1)
+v <- cbind(d, as.data.frame(fitted(vup, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA, probs = c(0.05, 0.95))))%>%
+  mutate(Vd = as.factor(Vd),
+         Rd = as.factor(Rd),
+         Td = as.factor(Td),
+         Vd = factor(Vd,levels = c(30,0,-30))
+         )
+
+r <- cbind(d, as.data.frame(fitted(rup, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA, probs = c(0.05, 0.95))))%>%
+  mutate(Vd = as.factor(Vd),
+         Rd = as.factor(Rd),
+         Td = as.factor(Td),
+         Rd = factor(Rd,levels= c(120,0,-80))
+         )
+
+t <- cbind(d, as.data.frame(fitted(tup, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA, probs = c(0.05, 0.95))))%>%
+  mutate(Vd = as.factor(Vd),
+         Rd = as.factor(Rd),
+         Td = as.factor(Td),
+         Td = factor(Td,levels = c(15,0,-15))
+         )
+grid.arrange(
+ggplot(r)+
+  geom_line(aes(Month,Estimate,col=Rd,linetype=Rd),size=1.5)+
+  geom_ribbon(aes(Month,ymin=Q5,ymax=Q95,fill=Rd),alpha = 0.25)+
+  labs(title="Precipitation",x="Month", y="Ignitions",fill="Anomaly (%)",colour="Anomaly (%)",linetype="Anomaly (%)")+
+  scale_x_discrete(limits=seq(1:12))+ylim(0,20)+
+  scale_color_manual(values=c("#56B4E9", "#009E73", "#E69F00"))+
+  scale_fill_manual(values=c("#56B4E9", "#009E73", "#E69F00"))+
+  scale_linetype_manual(values = c(3,2,1))+
+  guides(linetype = guide_legend(reverse = TRUE),
+         colour = guide_legend(reverse = TRUE),
+         fill = guide_legend(reverse = TRUE)),
+
+ggplot(t)+
+  geom_line(aes(Month,Estimate,col=Td,linetype=Td),size=1.5)+
+  geom_ribbon(aes(Month,ymin=Q5,ymax=Q95,fill=Td),alpha = 0.25)+
+  labs(title="Temperature",x="Month", y="Ignitions",fill="Anomaly (%)",colour="Anomaly (%)",linetype="Anomaly (%)")+
+  scale_x_discrete(limits=seq(1:12))+ylim(0,20)+
+  scale_color_manual(values=c("#E69F00", "#009E73", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "#009E73", "#56B4E9")),
+ggplot(v)+
+  geom_line(aes(Month,Estimate,col=Vd,linetype=Vd),size=1.5)+
+  geom_ribbon(aes(Month,ymin=Q5,ymax=Q95,fill=Vd),alpha = 0.25)+
+  labs(title="VPD",x="Month", y="Ignitions",fill="Anomaly (%)",colour="Anomaly (%)",linetype="Anomaly (%)")+
+  scale_x_discrete(limits=seq(1:12))+ylim(0,20)+
+  scale_color_manual(values=c("#E69F00", "#009E73", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "#009E73", "#56B4E9")),
+nrow=3)
+```
+
+predict probability distributions of annual ignitions under longterm and study period climate anomalies.
+```{r}
+#data frame of the average monthly anomaly across the study period
+ig<-datup%>% 
+  group_by(Month)%>%
+  summarise(Ignitions=mean(Ignitions),
+            Vd = mean(Vd),
+            Rd = mean(Rd),
+            Td = mean(Td))%>%
+  data.frame()
+
+#average monthly anomaly for the study periond and the longterm average anomaly (i.e. 0)
+d<-data.frame(Vd=c(rep(0,12), ig$Vd), 
+              Rd=c(rep(0,12), ig$Rd),
+              Td=c(rep(0,12), ig$Td),
+         Month=rep(seq(1:12),2),
+         index=1)
+
+#4000 predictions of monthly ignitions under the longterm and study period average climate anomalies for rainfall (pr), temperature (pt) and vapour pressure deficit (pv)
+pr <- fitted(rup,summary=FALSE, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA)
+pt <- fitted(tup,summary=FALSE, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA)
+pv <- fitted(vup,summary=FALSE, robust = TRUE,incl_autocor=FALSE, newdata=d,re_formula = NA)
+
+
+#Convert predicted monthly ignitions into predicted annual ignitions and then compile predictions into a single data frame and denote the climate variable and climate scenario the prediction was made for.
+dist<-data.frame(c(rowSums(pr[,1:12]),
+        rowSums(pr[,13:24]),
+        rowSums(pt[,1:12]),
+        rowSums(pt[,13:24]),
+        rowSums(pv[,1:12]),
+        rowSums(pv[,13:24])))%>%
+  mutate(Scenario = rep(c(rep('Long-term',8000),rep('Study period',8000)),3),
+         variable = rep(c(rep('Precipitation',16000),rep('Temperature',16000),rep('VPD',16000))))
+
+#plot density distributuions
+ggplot(dist, aes(x = pred, y = fct_rev(variable))) +
+  geom_density_ridges(aes(fill=Scenario),alpha=0.5,show.legend = TRUE,col=NA,scale=0.99)+
+  labs(x="Predicted annual ignitions", y="Climate anomaly",fill="Climate scenario")+
+  scale_x_continuous(limits=c(30,90),breaks=seq(30,90,by=10))+
+  scale_y_discrete(expand = c(0.05, 0.05))+
+  scale_fill_manual(values = rev(hue_pal()(2)))
+```
+
